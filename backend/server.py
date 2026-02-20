@@ -10,14 +10,20 @@ import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from detector import AnimalDetector
+try:
+    from pose_detector import WateringHoleDetector
+    USE_POSE = True
+except ImportError:
+    from detector import AnimalDetector
+    USE_POSE = False
 
 YOUTUBE_URL = os.environ.get("YOUTUBE_URL", "https://www.youtube.com/live/ydYDqZQpim8")
-MODEL_SIZE = os.environ.get("MODEL_SIZE", "yolov8n.pt")
-CONFIDENCE = float(os.environ.get("CONFIDENCE", "0.3"))
 
 app = FastAPI(title="Watering Hole Tracker")
-detector = AnimalDetector(YOUTUBE_URL, MODEL_SIZE, CONFIDENCE)
+if USE_POSE:
+    detector = WateringHoleDetector(YOUTUBE_URL)
+else:
+    detector = AnimalDetector(YOUTUBE_URL)
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
