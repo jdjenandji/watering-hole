@@ -4,8 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>🦒 Watering Hole Tracker</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', system-ui, sans-serif; background: #0a0a0f; color: #e0e0e0; }
@@ -20,11 +18,10 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
   .main { display: flex; height: calc(100vh - 57px); }
-  .video-area { flex: 1; position: relative; background: #000; display: flex; align-items: center; justify-content: center; }
-  .video-container { position: relative; width: 100%; height: 100%; }
-  .video-container iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-  #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
-  #captureCanvas { display: none; }
+  .video-area { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; }
+  .video-area img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .no-frame { color: #444; font-size: 1.2em; text-align: center; }
+  .no-frame .spinner { font-size: 2em; animation: pulse 1.5s infinite; margin-bottom: 12px; }
 
   .sidebar { width: 280px; background: #0f0f18; border-left: 1px solid #1e1e2e; padding: 16px; overflow-y: auto; flex-shrink: 0; }
   .sidebar h2 { font-size: 0.9em; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
@@ -44,8 +41,6 @@
   .log-entry { padding: 2px 0; border-bottom: 1px solid #111; }
   .log-time { color: #444; }
 
-  .note { background: #1a1a0f; border: 1px solid #333300; border-radius: 8px; padding: 12px; margin-bottom: 16px; font-size: 0.8em; color: #cca; }
-
   @media (max-width: 768px) {
     .main { flex-direction: column; }
     .sidebar { width: 100%; max-height: 40vh; border-left: none; border-top: 1px solid #1e1e2e; }
@@ -58,30 +53,22 @@
   <h1>🦒 Watering Hole Tracker <span>Naledi Cat-EYE</span></h1>
   <div class="status">
     <div class="status-dot loading" id="statusDot"></div>
-    <span id="statusText">Loading model...</span>
+    <span id="statusText">Connecting...</span>
     <span style="color:#444;margin-left:8px" id="fpsText"></span>
   </div>
 </div>
 
 <div class="main">
   <div class="video-area">
-    <div class="video-container">
-      <iframe id="ytPlayer"
-        src="https://www.youtube.com/embed/ydYDqZQpim8?autoplay=1&mute=1&enablejsapi=1&origin=${location.origin}"
-        frameborder="0" allow="autoplay; encrypted-media" allowfullscreen>
-      </iframe>
-      <canvas id="overlayCanvas"></canvas>
+    <img id="videoFrame" style="display:none" />
+    <div class="no-frame" id="noFrame">
+      <div class="spinner">📡</div>
+      <div>Connecting to watering hole stream...</div>
+      <div style="font-size:0.8em;color:#333;margin-top:8px" id="waitMsg">Starting detection pipeline</div>
     </div>
-    <canvas id="captureCanvas"></canvas>
   </div>
 
   <div class="sidebar">
-    <div class="note">
-      ⚠️ <b>Cross-origin limitation</b>: YouTube iframes block direct frame capture. 
-      Detection runs on periodic screenshots. For full real-time detection, 
-      use the backend with stream cookies.
-    </div>
-
     <h2>Current Animals</h2>
     <div class="stats">
       <div class="stat-card">
@@ -94,7 +81,7 @@
       </div>
     </div>
     <div class="animal-list" id="animalList">
-      <div style="color:#444;font-size:0.85em;text-align:center;padding:20px">Waiting for model to load...</div>
+      <div style="color:#444;font-size:0.85em;text-align:center;padding:20px">Waiting for stream...</div>
     </div>
     <div class="log">
       <h2>Activity Log</h2>
@@ -108,156 +95,96 @@ const EMOJIS = {
   bird: '🐦', cat: '🐱', dog: '🐕', horse: '🐴', sheep: '🐑',
   cow: '🐄', elephant: '🐘', bear: '🐻', zebra: '🦓', giraffe: '🦒',
 };
-const ANIMAL_CLASSES = new Set(['bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe']);
-const COLORS = {
-  bird: '#00ffff', cat: '#ff00ff', dog: '#ffa500', horse: '#00a5ff',
-  sheep: '#c8c8c8', cow: '#6464ff', elephant: '#808080', bear: '#3232c8',
-  zebra: '#ffffff', giraffe: '#00c8c8',
-};
 
-let model = null;
-let detecting = false;
+const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = `${proto}//${location.host}/ws`;
+let ws = null;
 let lastSpecies = new Set();
-let frameCount = 0;
 
-// Try to use a proxy image approach: capture YT thumbnail periodically
-// Since we can't access iframe pixels due to cross-origin, we'll use
-// the YouTube live thumbnail which updates every ~5 seconds
-
-async function loadModel() {
+function connect() {
   const dot = document.getElementById('statusDot');
   const text = document.getElementById('statusText');
-  addLog('Loading COCO-SSD model...');
+  dot.className = 'status-dot loading';
+  text.textContent = 'Connecting...';
 
-  try {
-    model = await cocoSsd.load({ base: 'mobilenet_v2' });
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
     dot.className = 'status-dot live';
-    text.textContent = 'Model loaded — detecting';
-    addLog('✅ Model loaded, starting detection');
-    startDetection();
-  } catch (e) {
-    dot.className = 'status-dot error';
-    text.textContent = 'Model load failed';
-    addLog('❌ Model failed: ' + e.message);
-  }
-}
+    text.textContent = 'Connected';
+    addLog('Connected to server');
+  };
 
-// YouTube live thumbnails update in near real-time
-function getThumbnailUrl() {
-  // maxresdefault updates periodically for live streams
-  return `https://i.ytimg.com/vi/ydYDqZQpim8/hqdefault_live.jpg?t=${Date.now()}`;
-}
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
 
-async function detectFrame() {
-  if (detecting || !model) return;
-  detecting = true;
-
-  try {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = getThumbnailUrl();
-    });
-
-    const t0 = performance.now();
-    const predictions = await model.detect(img);
-    const dt = performance.now() - t0;
-
-    // Filter to animals
-    const animals = predictions.filter(p => ANIMAL_CLASSES.has(p.class) && p.score > 0.3);
-
-    // Draw overlay
-    const overlay = document.getElementById('overlayCanvas');
-    const container = overlay.parentElement;
-    overlay.width = container.clientWidth;
-    overlay.height = container.clientHeight;
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-    // Scale factors (thumbnail is 480x360, overlay matches container)
-    const sx = overlay.width / img.naturalWidth;
-    const sy = overlay.height / img.naturalHeight;
-
-    for (const pred of animals) {
-      const [x, y, w, h] = pred.bbox;
-      const dx = x * sx, dy = y * sy, dw = w * sx, dh = h * sy;
-      const color = COLORS[pred.class] || '#00ff00';
-
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(dx, dy, dw, dh);
-
-      const label = `${EMOJIS[pred.class] || ''} ${pred.class} ${(pred.score * 100).toFixed(0)}%`;
-      ctx.font = '14px -apple-system, sans-serif';
-      const tm = ctx.measureText(label);
-      ctx.fillStyle = color;
-      ctx.fillRect(dx, dy - 20, tm.width + 8, 20);
-      ctx.fillStyle = '#000';
-      ctx.fillText(label, dx + 4, dy - 5);
+    if (data.type === 'waiting') {
+      dot.className = 'status-dot loading';
+      text.textContent = 'Waiting for stream';
+      document.getElementById('waitMsg').textContent = data.message;
+      return;
     }
 
-    // Update UI
-    document.getElementById('animalCount').textContent = animals.length;
-    const species = new Set(animals.map(a => a.class));
-    document.getElementById('speciesCount').textContent = species.size;
-    document.getElementById('fpsText').textContent = `${(1000 / dt).toFixed(1)} det/s`;
+    if (data.type === 'frame') {
+      const img = document.getElementById('videoFrame');
+      const noFrame = document.getElementById('noFrame');
+      img.src = 'data:image/jpeg;base64,' + data.image;
+      img.style.display = 'block';
+      noFrame.style.display = 'none';
 
-    // Log new arrivals/departures
-    for (const s of species) {
-      if (!lastSpecies.has(s)) addLog(`${EMOJIS[s] || '🐾'} ${s} appeared`);
-    }
-    for (const s of lastSpecies) {
-      if (!species.has(s)) addLog(`${EMOJIS[s] || '🐾'} ${s} left`);
-    }
-    lastSpecies = species;
+      dot.className = 'status-dot live';
+      text.textContent = 'Live';
+      document.getElementById('fpsText').textContent = `${data.fps} det/s`;
+      document.getElementById('animalCount').textContent = data.count;
 
-    // Update animal list
-    const list = document.getElementById('animalList');
-    if (animals.length === 0) {
-      list.innerHTML = '<div style="color:#444;font-size:0.85em;text-align:center;padding:20px">No animals detected</div>';
-    } else {
-      const grouped = {};
-      for (const a of animals) {
-        if (!grouped[a.class]) grouped[a.class] = { count: 0, maxConf: 0 };
-        grouped[a.class].count++;
-        grouped[a.class].maxConf = Math.max(grouped[a.class].maxConf, a.score);
+      const species = new Set(data.detections.map(d => d.class));
+      document.getElementById('speciesCount').textContent = species.size;
+
+      for (const s of species) {
+        if (!lastSpecies.has(s)) addLog(`${EMOJIS[s] || '🐾'} ${s} appeared`);
       }
-      list.innerHTML = Object.entries(grouped)
-        .sort((a, b) => b[1].count - a[1].count)
-        .map(([cls, info]) => `
-          <div class="animal-item">
-            <div>
-              <span class="animal-emoji">${EMOJIS[cls] || '🐾'}</span>
-              <span class="animal-name">${cls}</span>
-              <span style="color:#666;font-size:0.8em"> ×${info.count}</span>
+      for (const s of lastSpecies) {
+        if (!species.has(s)) addLog(`${EMOJIS[s] || '🐾'} ${s} left`);
+      }
+      lastSpecies = species;
+
+      const list = document.getElementById('animalList');
+      if (data.detections.length === 0) {
+        list.innerHTML = '<div style="color:#444;font-size:0.85em;text-align:center;padding:20px">No animals detected</div>';
+      } else {
+        const grouped = {};
+        for (const d of data.detections) {
+          if (!grouped[d.class]) grouped[d.class] = { count: 0, maxConf: 0 };
+          grouped[d.class].count++;
+          grouped[d.class].maxConf = Math.max(grouped[d.class].maxConf, d.confidence);
+        }
+        list.innerHTML = Object.entries(grouped)
+          .sort((a, b) => b[1].count - a[1].count)
+          .map(([cls, info]) => `
+            <div class="animal-item">
+              <div>
+                <span class="animal-emoji">${EMOJIS[cls] || '🐾'}</span>
+                <span class="animal-name">${cls}</span>
+                <span style="color:#666;font-size:0.8em"> ×${info.count}</span>
+              </div>
+              <div style="font-size:0.85em;color:#888">
+                ${(info.maxConf * 100).toFixed(0)}%
+                <div class="conf-bar"><div class="conf-fill" style="width:${info.maxConf * 100}%"></div></div>
+              </div>
             </div>
-            <div style="font-size:0.85em;color:#888">
-              ${(info.maxConf * 100).toFixed(0)}%
-              <div class="conf-bar"><div class="conf-fill" style="width:${info.maxConf * 100}%"></div></div>
-            </div>
-          </div>
-        `).join('');
+          `).join('');
+      }
     }
+  };
 
-    frameCount++;
+  ws.onclose = () => {
+    dot.className = 'status-dot error';
+    text.textContent = 'Disconnected';
+    addLog('Disconnected — reconnecting in 3s...');
+    setTimeout(connect, 3000);
+  };
 
-  } catch (e) {
-    // Thumbnail may fail sometimes — that's ok
-    if (frameCount === 0) {
-      document.getElementById('statusText').textContent = 'Waiting for stream thumbnail...';
-    }
-  }
-
-  detecting = false;
-}
-
-function startDetection() {
-  // Run detection every 2 seconds (thumbnail update rate)
-  setInterval(detectFrame, 2000);
-  detectFrame();
+  ws.onerror = () => ws.close();
 }
 
 function addLog(msg) {
@@ -267,8 +194,7 @@ function addLog(msg) {
   while (el.children.length > 50) el.removeChild(el.lastChild);
 }
 
-// Start
-loadModel();
+connect();
 </script>
 </body>
 </html>
