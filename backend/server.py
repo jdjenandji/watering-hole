@@ -39,6 +39,11 @@ async def index():
     return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 @app.get("/api/status")
 async def status():
     state = detector.get_state()
@@ -83,4 +88,5 @@ async def websocket_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
